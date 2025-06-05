@@ -48,7 +48,7 @@ export const globalSettingsSchema = z.object({
 	allowedMaxRequests: z.number().nullish(),
 	autoCondenseContext: z.boolean().optional(),
 	autoCondenseContextPercent: z.number().optional(),
- 	maxConcurrentFileReads: z.number().optional(),
+	maxConcurrentFileReads: z.number().optional(),
 
 	browserToolEnabled: z.boolean().optional(),
 	browserViewportSize: z.string().optional(),
@@ -56,6 +56,7 @@ export const globalSettingsSchema = z.object({
 	remoteBrowserEnabled: z.boolean().optional(),
 	remoteBrowserHost: z.string().optional(),
 	cachedChromeHostUrl: z.string().optional(),
+	showBrowserForTextMode: z.boolean().optional(),
 
 	enableCheckpoints: z.boolean().optional(),
 
@@ -142,6 +143,7 @@ export const GLOBAL_SETTINGS_KEYS = keysOf<GlobalSettings>()([
 	"screenshotQuality",
 	"remoteBrowserEnabled",
 	"remoteBrowserHost",
+	"showBrowserForTextMode",
 
 	"enableCheckpoints",
 
