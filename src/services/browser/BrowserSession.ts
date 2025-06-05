@@ -57,18 +57,46 @@ export class BrowserSession {
 	}
 
 	/**
+	 * Returns a random user agent string from a predefined list
+	 */
+	private getRandomUserAgent(): string[] {
+		const userAgents = [
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+		]
+		const selectedAgent = userAgents[Math.floor(Math.random() * userAgents.length)]
+		return [`--user-agent=${selectedAgent}`]
+	}
+
+	/**
 	 * Launches a local browser instance
 	 */
-	private async launchLocalBrowser(): Promise<void> {
+	private async launchLocalBrowser(modelSupportsImages: boolean, modelSupportsComputerUse: boolean): Promise<void> {
 		console.log("Launching local browser")
 		const stats = await this.ensureChromiumExists()
+
+		// Determine browser visibility based on model capabilities
+		let shouldShowBrowser: boolean
+		if (!modelSupportsImages && modelSupportsComputerUse) {
+			// Computer use models without image support: run headless by default
+			shouldShowBrowser = this.context.globalState.get("showBrowserForTextMode") ?? false
+		} else {
+			// All other cases (including non-computer use models): show browser by default for better UX
+			shouldShowBrowser = this.context.globalState.get("showBrowserForTextMode") ?? true
+		}
+
 		this.browser = await stats.puppeteer.launch({
 			args: [
-				"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+				// Rotate user agents to mimic different browsers and reduce detection
+				...this.getRandomUserAgent(),
+				// Add custom headers for browser fingerprint evasion
+				"--lang=en-US,en;q=0.9",
 			],
 			executablePath: stats.executablePath,
 			defaultViewport: this.getViewport(),
-			// headless: false,
+			headless: !shouldShowBrowser,
 		})
 	}
 
@@ -156,32 +184,58 @@ export class BrowserSession {
 		return false
 	}
 
-	async launchBrowser(): Promise<void> {
-		console.log("launch browser called")
+	async launchBrowser(
+		modelSupportsImages: boolean = false,
+		modelSupportsComputerUse: boolean = false,
+	): Promise<void> {
+		console.log("Launch browser called - initializing browser session")
 
 		// Check if remote browser connection is enabled
 		const remoteBrowserEnabled = this.context.globalState.get("remoteBrowserEnabled") as boolean | undefined
 
-		if (!remoteBrowserEnabled) {
-			console.log("Launching local browser")
-			if (this.browser) {
-				// throw new Error("Browser already launched")
-				await this.closeBrowser() // this may happen when the model launches a browser again after having used it already before
-			} else {
-				// If browser wasn't open, just reset the state
-				this.resetBrowserState()
-			}
-			await this.launchLocalBrowser()
+		// Reset browser state before attempting a new launch
+		if (this.browser) {
+			console.log("Browser already exists, closing previous session before relaunch")
+			await this.closeBrowser()
 		} else {
-			console.log("Connecting to remote browser")
-			// Remote browser connection is enabled
+			this.resetBrowserState()
+		}
+
+		if (!remoteBrowserEnabled) {
+			console.log("Launching local browser instance")
+			await this.launchLocalBrowser(modelSupportsImages, modelSupportsComputerUse)
+		} else {
+			console.log("Attempting connection to remote browser")
 			const remoteConnected = await this.connectToRemoteBrowser()
 
-			// If all remote connection attempts fail, fall back to local browser
 			if (!remoteConnected) {
-				console.log("Falling back to local browser")
-				await this.launchLocalBrowser()
+				console.log("Remote connection failed, falling back to local browser instance")
+				await this.launchLocalBrowser(modelSupportsImages, modelSupportsComputerUse)
+			} else {
+				console.log("Successfully connected to remote browser")
 			}
+		}
+
+		// Verify browser initialization
+		if (!this.browser) {
+			throw new Error("Browser initialization failed - no browser instance created")
+		} else {
+			console.log("Browser initialization successful")
+		}
+
+		// Ensure we have a page available for doAction calls
+		if (this.browser && !this.page) {
+			console.log("Creating initial page for browser session")
+			this.page = await this.browser.newPage()
+			// Wait for the page to be ready
+			await this.page
+				.waitForFunction(
+					'window.document.readyState === "complete" || window.document.readyState === "interactive"',
+					{ timeout: 5000 },
+				)
+				.catch(() => {
+					console.log("Initial page load timeout, proceeding anyway")
+				})
 		}
 	}
 
@@ -197,10 +251,10 @@ export class BrowserSession {
 				await this.browser.disconnect().catch(() => {})
 			} else {
 				await this.browser?.close().catch(() => {})
-				this.resetBrowserState()
 			}
 
-			// this.resetBrowserState()
+			// Always reset browser state after closing/disconnecting
+			this.resetBrowserState()
 		}
 		return {}
 	}
@@ -215,9 +269,12 @@ export class BrowserSession {
 	}
 
 	async doAction(action: (page: Page) => Promise<void>): Promise<BrowserActionResult> {
-		if (!this.page) {
+		if (!this.browser || !this.page) {
 			throw new Error(
-				"Browser is not launched. This may occur if the browser was automatically closed by a non-`browser_action` tool.",
+				"Browser is not launched or page is not initialized. This may occur if the browser was automatically closed by a non-`browser_action` tool. Current state - Browser: " +
+					(this.browser ? "Initialized" : "Not Initialized") +
+					", Page: " +
+					(this.page ? "Initialized" : "Not Initialized"),
 			)
 		}
 
@@ -243,7 +300,16 @@ export class BrowserSession {
 		this.page.on("pageerror", errorListener)
 
 		try {
+			// Add random delay to mimic human behavior for browser fingerprint evasion
+			await delay(Math.random() * 500 + 200)
 			await action(this.page)
+			// Simulate random mouse movement for additional human-like behavior
+			if (this.page) {
+				const { width, height } = this.getViewport()
+				const x = Math.floor(Math.random() * width)
+				const y = Math.floor(Math.random() * height)
+				await this.page.mouse.move(x, y)
+			}
 		} catch (err) {
 			if (!(err instanceof TimeoutError)) {
 				logs.push(`[Error] ${err.toString()}`)
@@ -310,8 +376,52 @@ export class BrowserSession {
 			// Remove www. prefix if present
 			return urlObj.host.replace(/^www\./, "")
 		} catch (error) {
+			console.error(`URL parsing failed for ${url}: ${error.message}`)
 			// If URL parsing fails, return the original URL
 			return url
+		}
+	}
+
+	/**
+	 * Load cookies for a specific domain from storage
+	 */
+	private async loadCookies(page: Page, url: string): Promise<void> {
+		try {
+			const globalStoragePath = this.context?.globalStorageUri?.fsPath
+			if (!globalStoragePath) return
+
+			const domain = this.getRootDomain(url)
+			const cookiesFile = path.join(globalStoragePath, "cookies", `${domain}.json`)
+			if (await fileExistsAtPath(cookiesFile)) {
+				const cookiesData = await fs.readFile(cookiesFile, "utf-8")
+				const cookies = JSON.parse(cookiesData)
+				await page.setCookie(...cookies)
+				console.log(`Loaded cookies for ${domain}`)
+			}
+		} catch (error) {
+			console.error(`Failed to load cookies for ${url}: ${error.message}`)
+		}
+	}
+
+	/**
+	 * Save cookies for a specific domain to storage
+	 */
+	private async saveCookies(page: Page, url: string): Promise<void> {
+		try {
+			const globalStoragePath = this.context?.globalStorageUri?.fsPath
+			if (!globalStoragePath) return
+
+			const domain = this.getRootDomain(url)
+			const cookiesDir = path.join(globalStoragePath, "cookies")
+			if (!(await fileExistsAtPath(cookiesDir))) {
+				await fs.mkdir(cookiesDir, { recursive: true })
+			}
+
+			const cookies = await page.cookies()
+			await fs.writeFile(path.join(cookiesDir, `${domain}.json`), JSON.stringify(cookies, null, 2), "utf-8")
+			console.log(`Saved cookies for ${domain}`)
+		} catch (error) {
+			console.error(`Failed to save cookies for ${url}: ${error.message}`)
 		}
 	}
 
@@ -319,8 +429,19 @@ export class BrowserSession {
 	 * Navigate to a URL with standard loading options
 	 */
 	private async navigatePageToUrl(page: Page, url: string): Promise<void> {
-		await page.goto(url, { timeout: 7_000, waitUntil: ["domcontentloaded", "networkidle2"] })
-		await this.waitTillHTMLStable(page)
+		// Load cookies if available to maintain session state
+		await this.loadCookies(page, url)
+		await page
+			.goto(url, { timeout: 10_000, waitUntil: ["domcontentloaded", "networkidle2"] })
+			.catch(async (err) => {
+				console.log(`Initial navigation failed: ${err.message}. Retrying...`)
+				await page.goto(url, { timeout: 10_000, waitUntil: ["domcontentloaded", "networkidle2"] }).catch(() => {
+					console.log("Retry navigation failed, proceeding with current state.")
+				})
+			})
+		// Save cookies after navigation to persist session
+		await this.saveCookies(page, url)
+		await this.waitTillHTMLStable(page, 7000)
 	}
 
 	/**
@@ -347,10 +468,11 @@ export class BrowserSession {
 
 	async navigateToUrl(url: string): Promise<BrowserActionResult> {
 		if (!this.browser) {
-			throw new Error("Browser is not launched")
+			throw new Error("Browser is not launched. Current state - Browser: Not Initialized")
 		}
 		// Remove trailing slash for comparison
 		const normalizedNewUrl = url.replace(/\/$/, "")
+		console.log(`Navigating to URL: ${normalizedNewUrl}`)
 
 		// Extract the root domain from the URL
 		const rootDomain = this.getRootDomain(normalizedNewUrl)
@@ -383,14 +505,13 @@ export class BrowserSession {
 			this.page = existingPage
 			existingPage.bringToFront()
 
-			// Navigate to the new URL if it's different]
+			// Navigate to the new URL if it's different
 			const currentUrl = existingPage.url().replace(/\/$/, "") // Remove trailing / if present
 			if (this.getRootDomain(currentUrl) === rootDomain && currentUrl !== normalizedNewUrl) {
 				console.log(`Navigating to new URL: ${normalizedNewUrl}`)
 				console.log(`Current URL: ${currentUrl}`)
 				console.log(`Root domain: ${this.getRootDomain(currentUrl)}`)
 				console.log(`New URL: ${normalizedNewUrl}`)
-				// Navigate to the new URL
 				return this.doAction(async (page) => {
 					await this.navigatePageToUrl(page, normalizedNewUrl)
 				})
@@ -402,8 +523,17 @@ export class BrowserSession {
 				console.log(`Root domain: ${this.getRootDomain(currentUrl)}`)
 				console.log(`New URL: ${normalizedNewUrl}`)
 				return this.doAction(async (page) => {
-					await page.reload({ timeout: 7_000, waitUntil: ["domcontentloaded", "networkidle2"] })
-					await this.waitTillHTMLStable(page)
+					await page
+						.reload({ timeout: 10_000, waitUntil: ["domcontentloaded", "networkidle2"] })
+						.catch(async (err) => {
+							console.log(`Reload failed: ${err.message}. Retrying...`)
+							await page
+								.reload({ timeout: 10_000, waitUntil: ["domcontentloaded", "networkidle2"] })
+								.catch(() => {
+									console.log("Retry reload failed, proceeding with current state.")
+								})
+						})
+					await this.waitTillHTMLStable(page, 7000)
 				})
 			}
 		} else {
@@ -475,10 +605,14 @@ export class BrowserSession {
 			await page
 				.waitForNavigation({
 					waitUntil: ["domcontentloaded", "networkidle2"],
-					timeout: 7000,
+					timeout: 10000,
 				})
-				.catch(() => {})
-			await this.waitTillHTMLStable(page)
+				.catch((err) => {
+					console.log(
+						`Navigation wait failed after interaction: ${err.message}. Proceeding with current state.`,
+					)
+				})
+			await this.waitTillHTMLStable(page, 7000)
 		}
 
 		// Clean up listener
@@ -548,6 +682,30 @@ export class BrowserSession {
 				bounds: { width, height },
 				windowId,
 			})
+		})
+	}
+
+	async goBack(): Promise<BrowserActionResult> {
+		return this.doAction(async (page) => {
+			await page
+				.goBack({ timeout: 10000, waitUntil: ["domcontentloaded", "networkidle2"] })
+				.catch(async (err) => {
+					console.error("Back navigation error:", err)
+					throw new Error(`Failed to navigate back: ${err.message}`)
+				})
+			await this.waitTillHTMLStable(page, 7000)
+		})
+	}
+
+	async goForward(): Promise<BrowserActionResult> {
+		return this.doAction(async (page) => {
+			await page
+				.goForward({ timeout: 10000, waitUntil: ["domcontentloaded", "networkidle2"] })
+				.catch(async (err) => {
+					console.error("Forward navigation error:", err)
+					throw new Error(`Failed to navigate forward: ${err.message}`)
+				})
+			await this.waitTillHTMLStable(page, 7000)
 		})
 	}
 }
