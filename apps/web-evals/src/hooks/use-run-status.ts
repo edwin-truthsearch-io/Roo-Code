@@ -92,7 +92,7 @@ export const useRunStatus = (run: Run): RunStatus => {
 
 	return {
 		sseStatus,
-		heartbeat,
+		heartbeat: typeof heartbeat === "string" ? heartbeat : null,
 		runners,
 		tasks,
 		tokenUsage: tokenUsage.current,
